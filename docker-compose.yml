@@ -1,0 +1,109 @@
+version: "3.9"
+
+services:
+
+  # ── Infrastructure ────────────────────────────────────────────────────
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: portfolio_gen
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── MCP Servers ───────────────────────────────────────────────────────
+
+  component-library-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python mcp_servers/component_library/server.py
+    ports:
+      - "8001:8001"
+    environment:
+      COMPONENT_LIBRARY_PORT: 8001
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    working_dir: /app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  resume-parser-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python mcp_servers/resume_parser/server.py
+    ports:
+      - "8002:8002"
+    environment:
+      RESUME_PARSER_PORT: 8002
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    working_dir: /app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── Main API ──────────────────────────────────────────────────────────
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://postgres:password@postgres:5432/portfolio_gen
+      COMPONENT_LIBRARY_MCP_URL: http://component-library-mcp:8001/sse
+      RESUME_PARSER_MCP_URL: http://resume-parser-mcp:8002/sse
+    volumes:
+      - .:/app
+    working_dir: /app
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      component-library-mcp:
+        condition: service_started
+      resume-parser-mcp:
+        condition: service_started
+
+volumes:
+  redis_data:
+  postgres_data:
